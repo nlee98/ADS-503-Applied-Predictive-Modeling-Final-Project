@@ -1,0 +1,592 @@
+---
+title: "ADS-503 Final Project"
+author: "Roberto Cancel, Kyle Estaban Dalope, Nicholas Lee"
+date: "6/27/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+## PACKAGES ##
+library(caret)
+library(fastDummies)
+library(ggplot2)
+library(Hmisc)
+library(knitr)
+library(patchwork)
+library(pROC)
+```
+
+# Data Import
+```{r Chunk 1: Import Data Set}
+## Load in Data - Convert Blank Cells to NA
+patient_data <- read.csv("dataset.csv", na.strings = c("","NA"))
+```
+
+
+```{r Chunk 2: Data Dictionary}
+## Load in File Containing Varible Definitions ##
+data_dictionary <- read.csv("Dataset Dictionary - updated.csv")
+```
+
+# Handling Missing Data
+```{r Chunk 3: View Missingness}
+summary(patient_data)
+```
+
+```{r Chunk 4: Drop ID and Convert Y to Factor}
+# Obtain and Drop id Columns #
+id_columns <- grep("_id", colnames(patient_data))
+patient_data <- patient_data[, -id_columns]
+# Convert Outcome Variable to factor #
+patient_data$hospital_death <- as.factor(patient_data$hospital_death)
+# Drop NAs from gender #
+patient_data <- patient_data[!is.na(patient_data$gender), ]
+patient_data$gender <- ifelse(patient_data$gender  == "M", "1", "0")
+patient_data$gender <- as.numeric(as.character(patient_data$gender))
+
+# Distribution of Target Variable #
+table(patient_data$hospital_death)
+## Roughly 8.6% of the data set is the positive class (1 = death)
+```
+
+```{r Chunk 5: Train-Test Split}
+# Stratified Sampling #
+set.seed(100)
+trainingRows <- createDataPartition(patient_data$hospital_death, 
+                                    p = 0.80,
+                                    list = FALSE)
+## Subset Data into Training and Test Sets ##
+patient_train <- patient_data[trainingRows, ]
+patient_test <- patient_data[-trainingRows, ]
+```
+
+```{r Chunk 6: View Training Set Summary}
+summary(patient_train)
+```
+
+```{r Chunk 7: Thought Process for Missing Data}
+sort(sapply(patient_train, function(x) sum(is.na(x))), decreasing = TRUE)
+```
+
+Given the high number of missing values, we will remove all features with more that 5% missingness. This is based on Schafer (1999) asserted that a missing rate of 5% or less is inconsequential.
+
+```{r Chunk 8: Remove Columns with 5% or More NA}
+# Remove Columns with 5% or more NA #
+patient_train_r <- patient_train[, !sapply(patient_train, 
+                                           function(x) mean(is.na(x)) > 0.05)]
+# Drop the same Columns from the Test Set #
+patient_test_r <- patient_test[, colnames(patient_train_r)]
+```
+
+```{r Chunk 9: Drop NA from Specific Illness Columns}
+subset <- patient_train_r[is.na(patient_train_r$aids), ]
+sort(colSums(is.na(subset)), decreasing = TRUE)
+```
+Missing data appears to be related to the missingness in illness-related features.
+
+```{r Chunk 10: Drop NA related to illnesses}
+patient_train_r <- patient_train_r[!is.na(patient_train_r$aids), ]
+patient_test_r <- patient_test_r[!is.na(patient_test_r$aids), ]
+```
+
+```{r Chunk 11: Drop Diagnosis Columns with Missing Values}
+#Drop the observations with missing apache_2 data
+patient_train_r2 <- patient_train_r[!is.na(patient_train_r$apache_2_diagnosis), ]
+patient_test_r2 <- patient_test_r[!is.na(patient_test_r$apache_2_diagnosis), ]
+
+#Drop the observations with missing apache_3j_diagnosis
+patient_train_r3 <- patient_train_r2[!is.na(patient_train_r$apache_2_diagnosis), ]
+patient_test_r3 <- patient_test_r2[!is.na(patient_test_r$apache_2_diagnosis), ]
+```
+
+```{r Chunk 12: Update NA’s in Ethnicity with “Other/Unknown”}
+patient_train_r3$ethnicity[is.na(patient_train_r3$ethnicity)] <- "Other/Unknown"
+patient_test_r3$ethnicity[is.na(patient_test_r3$ethnicity)] <- "Other/Unknown"
+```
+
+```{r Chunk 13: Impute Median}
+imp <- preProcess(patient_train_r3, method = c("medianImpute", "nzv", "corr"), cutoff = .8)
+train_pr = predict(imp, patient_train_r3)
+test_pr = predict(imp, patient_test_r3)
+```
+
+```{r Chunk 14: Ensure All NAs Have Been Removed}
+train_pr <- train_pr[complete.cases(train_pr), ]
+sum(is.na(train_pr))
+
+test_pr <- test_pr[complete.cases(test_pr), ]
+sum(is.na(test_pr))
+```
+
+# EDA
+```{r 14a. Stacked Bar Charts Pt.1}
+p1 <- ggplot(train_pr, aes(x = '', fill = hospital_death)) +
+    geom_bar(position = "fill") +
+    ggtitle("Proportion of Hospital Death Factors") +
+    xlab("Hospital Death") + coord_flip()
+
+p2 <- ggplot(train_pr, aes(x = icu_stay_type, fill = hospital_death)) +
+    geom_bar(position = "fill") +
+    ggtitle("Proportion of Death by ICU Stay Type") +
+    xlab("ICU Stay Type") + coord_flip()
+
+p1 / p2
+```
+
+```{r Chunk 14b. Stacked Bar Charts pt.2}
+p3 <- ggplot(train_pr, aes(x = apache_3j_bodysystem, fill = hospital_death)) +
+    geom_bar(position = "fill") +
+    ggtitle("Proportion of Death by Apache III System") +
+    xlab("Apache III Diagnosis") + coord_flip()
+
+p4 <- ggplot(train_pr, aes(x = apache_2_bodysystem, fill = hospital_death)) +
+    geom_bar(position = "fill") +
+    ggtitle("Proportion of Death by Apache II System") +
+    xlab("Apache II Diagnosis") + coord_flip()
+
+p3 / p4
+```
+
+```{r Chunk 14c. Histogram and Barplot Distribution of Age}
+p5 <- ggplot(train_pr, aes(x = age)) + 
+  geom_histogram(aes(fill = hospital_death), color = "blue") + 
+  ggtitle("Distribution of Age")
+p6 <- ggplot(train_pr, aes(x = age)) + geom_boxplot() +
+  ggtitle("Boxplot of Age")
+p5 / p6
+```
+
+```{r Chunk 14d. Plots of Ethnicity}
+p7 <- ggplot(train_pr, aes(x = ethnicity)) +
+  geom_bar(fill = "blue") + coord_flip()
+p8 <- ggplot(train_pr, aes(x = ethnicity, fill = hospital_death)) +
+  geom_bar(position = "fill") + coord_flip()
+
+p7 + p8
+```
+
+```{r Chunk 14e. Scatterplot between height and weight}
+p9 <- ggplot(train_pr, aes(x = height)) + geom_boxplot() +
+  ggtitle("Boxplot of Height (cm)")
+p10 <- ggplot(train_pr, aes(x = weight)) + geom_boxplot() +
+  ggtitle("Boxplot of Weight (kg)")
+
+p11 <- ggplot(train_pr, aes(x = height)) + 
+  geom_histogram(aes(fill = hospital_death), color = "blue") +
+  ggtitle("Distribution of Height (cm)") 
+p12 <- ggplot(train_pr, aes(x = weight)) + 
+  geom_histogram(aes(fill = hospital_death), color = "black", position = "fill") +
+  ggtitle("Distribution of Weight (kg)")
+p13 <- ggplot(train_pr, aes(x = weight)) + 
+  geom_histogram(aes(fill = hospital_death), color = "black") +
+  ggtitle("Distribution of Weight (kg)")
+
+p9 + p10
+p11 / (p12 + p13)
+```
+
+```{r Chunk 14f. Scatterplot Between Height and Weight}
+ggplot(train_pr, aes(x = height, y = weight, color = hospital_death)) +
+  geom_point() +
+  ggtitle("Scatterplot of Height and Weight by Hospital Death Factor")
+```
+# Feature Handling - Downsampling and Dummy Variables
+```{r Chunk 15: Dummy Variables and Downsampling}
+set.seed(100)
+#Due to our severely class imbalance, we've chosen to downsample the minority class
+downsampledTrain <- downSample(x = subset(train_pr, select = -hospital_death),
+                           y = train_pr$hospital_death,
+                           yname = "hospital_death")
+dim(train_pr)
+dim(downsampledTrain)
+table(downsampledTrain$hospital_death)
+X_train <- subset(downsampledTrain, select = -hospital_death)
+y_train <- downsampledTrain$hospital_death
+X_test <- subset(test_pr, select = -hospital_death)
+y_test <- test_pr$hospital_death
+#Dummy Variables
+character_features_train <- X_train[, sapply(X_train, class) == "character"]
+dummy_variables_train <- fastDummies::dummy_cols(character_features_train, remove_first_dummy = TRUE)
+character_features_test <- X_test[, sapply(X_test, class) == "character"]
+dummy_variables_test <- fastDummies::dummy_cols(character_features_test, remove_first_dummy = TRUE)
+```
+
+# Feature Extraction
+```{r Chunk 16: Remove Encoded Character Variables}
+# Drop the original 7 features #
+dummy_variables_train <- dummy_variables_train[, -c(1:6)]
+dummy_variables_test <- dummy_variables_test[, -c(1:6)]
+
+# Combine Dummy Variables with DataFrame #
+## Drop y-variable and merge with dummy variables ##
+train_withdummies <- data.frame(X_train, dummy_variables_train)
+test_withdummies <- data.frame(X_test, dummy_variables_test)
+
+## Drop Non-Dummy Encoded Variables ##
+train_withdummies <- train_withdummies[, sapply(train_withdummies, class) != "character"]
+test_withdummies <- test_withdummies[, sapply(test_withdummies, class) != "character"]
+```
+
+```{r Chunk 18. Find Linear Dependent Variables}
+linear = findLinearCombos(train_withdummies)
+#linear # suggests removing 66 67 68 69 71 72
+print("Columns to be removed:")
+colnames(train_withdummies[, c(66, 67, 68, 69, 71, 72)])
+cat("  \n")
+print("Columns to be retained")
+colnames(train_withdummies[, c(56, 59, 60, 62, 63, 65)])
+```
+
+```{r Chunk 19. Remove Linear Dependent Variables}
+train_withdummies_r <- train_withdummies[,-linear$remove]
+test_withdummies_r <- test_withdummies[,-linear$remove]
+```
+
+```{r Chunk 20. Convert y to factor strings}
+levels(y_train) <- c("no_death", "death")
+levels(y_test) <- c("no_death", "death")
+
+y_train <- factor(y_train, levels=rev(levels(y_train)))
+y_test <- factor(y_test, levels=rev(levels(y_test)))
+
+# Visualize Weight of Classes #
+table(y_train)
+table(y_test)
+```
+
+
+# Models
+## Logistic Regression Model
+```{r Model 1. Logistic Regression}
+# Train Control Settings #
+ctrl <- trainControl(method = "cv", #Cross-validation
+                    summaryFunction = twoClassSummary, #for binary classification
+                    classProbs = TRUE, #note class probabilities
+                    savePredictions = TRUE)
+
+## Logistic Regression Model #
+set.seed(100)
+lrFit <- train(x = train_withdummies_r,
+           	y = y_train,
+           	method = "glm",
+           	preProc = c("center","scale"),
+           	metric = "ROC", #best metric for classification
+           	trControl = ctrl)
+lrFit
+#lrFit$finalModel
+## Save ROC curve for the hold-out set
+lrRoc <- roc(response = lrFit$pred$obs,
+         	predictor = lrFit$pred$death,
+         	levels = rev(levels(lrFit$pred$obs)))
+plot(lrRoc, type = "s", col = 'red', 
+     legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults <- data.frame(obs = y_test,
+                      	LR = predict(lrFit, test_withdummies_r))
+
+confusionMatrix(testResults$LR, testResults$obs, positive = "death")
+```
+
+## Penalized Logistic Regression Model
+```{r Model 2. Penalized Logistic Regression}
+glmnGrid <- expand.grid(alpha = c(0, .2, .4, .6, 1),     
+                        lambda = seq(.01, .2, length = 2))   
+
+set.seed(100)
+glmnFit <- train(x = train_withdummies_r, 
+                 y = y_train,
+                 method = "glmnet",   #method is glmnet for penalized logistic regression
+                 tuneGrid = glmnGrid,
+                 metric = "ROC",
+                 trControl = ctrl)
+glmnFit
+glmnFit$results   #View results for each hyperparamater combination
+
+glmnetCM <- confusionMatrix(glmnFit, norm = "none")
+glmnetCM
+
+## Plot the ROC curve for the hold-out set
+glmRoc <- roc(response = glmnFit$pred$obs,
+             predictor = glmnFit$pred$death,
+             levels = rev(levels(glmnFit$pred$obs)))
+
+plot(glmRoc, legacy.axes = TRUE)
+
+testResults <- data.frame(obs = y_test,
+                      	GLM = predict(glmnFit, test_withdummies_r))
+
+confusionMatrix(testResults$GLM, testResults$obs, positive = "death")
+```
+
+## LDA Model
+```{r Model 3. LDA}
+set.seed(100)
+ldaFit <- train(x = train_withdummies_r,
+              	y = y_train,
+              	method = "lda",
+              	trControl = ctrl,
+              	preProcess=c("center", "scale","BoxCox"),
+              	metric="ROC")
+ldaFit
+#Training performance: ROC =0.861, Sens = 0.793, Spec = 0.757
+
+## Save ROC curve for the hold-out set
+ldaRoc <- roc(response = ldaFit$pred$obs,
+         	predictor = ldaFit$pred$death,
+         	levels = rev(levels(ldaFit$pred$obs)))
+
+plot(ldaRoc, type = "s", col = 'red', legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$LDA = predict(ldaFit, test_withdummies_r)
+confusionMatrix(testResults$LDA, testResults$obs, positive = "death")
+
+#Test performance: Sens = 0.766, Spec = 0.794 (3370 no deaths classified as deaths)
+varImp(ldaFit)
+```
+
+## PLSDA Model
+```{r Model 4. PLSDDA}
+set.seed(100)
+plsGrid = expand.grid(.ncomp = 1:10)
+
+plsdaFit <- train(x = train_withdummies_r,
+              	y = y_train,
+              	method = "pls",
+              	tuneGrid = plsGrid,
+              	preProc = c("center","scale"),
+              	metric = "ROC",
+              	trControl = ctrl)
+plsdaFit
+
+#Training performance: ROC =0.861, Sens = 0.793, Spec = 0.758
+
+## Save ROC curve for the hold-out set
+plsdaRoc <- roc(response = plsdaFit$pred$obs,
+         	predictor = plsdaFit$pred$death,
+         	levels = rev(levels(plsdaFit$pred$obs)))
+
+plot(plsdaRoc, type = "s", col = 'red', legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$plsLDA = predict(plsdaFit, test_withdummies_r)
+confusionMatrix(testResults$plsLDA, testResults$obs, positive = "death")
+
+#Test performance: Sens = 0.764, Spec = 0.794 (3385 no deaths classified as deaths)
+varImp(plsdaFit)
+```
+
+## MDA Model
+```{r Model 5. MDA}
+set.seed(100)
+
+mdaFit <- train(x = train_withdummies_r, 
+               y = y_train,
+               method = "mda",
+               tuneGrid = expand.grid(subclasses=1:3),
+               preProc = c("center","scale"),
+               metric = "ROC",
+               trControl = ctrl)
+
+mdaFit
+
+## Save ROC curve for the hold-out set
+mdaRoc <- roc(response = mdaFit$pred$obs,
+             predictor = mdaFit$pred$death,
+             levels = rev(levels(mdaFit$pred$obs)))
+
+plot(mdaRoc, type = "s", col = 'red', legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$MDA = predict(mdaFit, test_withdummies_r)
+confusionMatrix(testResults$MDA, testResults$obs, positive = "death")
+varImp(mdaFit)
+```
+
+## (CART) Decision Tree Model
+```{r Model 6. Decision Tree}
+# Change Character Variables to Factors #
+x_tree_train <- X_train
+x_tree_test <- X_test
+x_tree_train[sapply(x_tree_train, is.character)] <- lapply(
+  x_tree_train[sapply(x_tree_train, is.character)], as.factor)
+x_tree_test[sapply(x_tree_test, is.character)] <- lapply(
+  x_tree_test[sapply(x_tree_test, is.character)], as.factor)
+
+
+set.seed(100)
+dtree <- train(x = x_tree_train, y = y_train,
+               method = "rpart", metric = "ROC",
+               trControl = ctrl, tuneLength = 30)
+
+dtree #Optimal cp = 0.0008108985
+#ROC = 0.8167127, Sens. = 0.7633954, Spec. = 0.7499187
+#dtree$finalModel
+dtreeRoc <- roc(response = dtree$pred$obs,
+         	predictor = dtree$pred$death,
+         	levels = rev(levels(dtree$pred$obs)))
+plot(dtreeRoc, type = "s", col = 'blue', 
+     legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$DecisionTree <- c(predict(dtree, x_tree_test))
+
+confusionMatrix(testResults$DecisionTree, testResults$obs, positive = "death")
+```
+
+## Random Forest Model
+```{r Model 7. Random Forest}
+# Recommended values of mtry: sqrt(p) = sqrt(43) ~ 6 or 7
+mtryvalues <- c(7)
+
+set.seed(100)
+randforest <- train(x = x_tree_train, y = y_train,
+               method = "rf", metric = "ROC",
+               trControl = ctrl, 
+               tuneGrid = data.frame(mtry = mtryvalues),
+               ntree = 50)
+
+randforest
+#ROC = 0.8633535, Sens. = 0.7955027, Spec. = 0.7698633
+## Compared to Baseline Decision Tree, ROC and Sens. increased, Spec. decreased slightly
+randforest$finalModel #OOB estimate of error rate: 22.64%
+
+randforestROC <- roc(response = randforest$pred$obs,
+         	predictor = randforest$pred$death,
+         	levels = rev(levels(randforest$pred$obs)))
+plot(randforestROC, type = "s", col = 'purple', 
+     legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$RandomForest <- c(predict(randforest, x_tree_test))
+#testResults$RandomForest <- as.factor(ifelse(testResults$RandomForest == 2, "no_death", "death"))
+
+confusionMatrix(testResults$RandomForest, testResults$obs, positive = "death")
+```
+
+## Boosted Tree Model
+```{r Model 8. Boosted Trees}
+gbmGrid <- expand.grid(interaction.depth = c(5),
+                       n.trees = (1:20)*5,
+                       shrinkage = c(.01, .1),
+                       n.minobsinnode = 5)
+
+set.seed(100)
+boost_tree <- train(x = x_tree_train, y = y_train,
+                method = "gbm", tuneGrid = gbmGrid,
+                verbose = FALSE, metric = "ROC",
+                trControl = ctrl)
+boost_tree
+# Shrinkage = 0.1, n.tree = 5
+# ROC = 0.8745928, Sens. = 0.7955037, Spec. = 0.7851062
+
+#boost_tree$finalModel
+
+confusionMatrix(boost_tree, norm = "none")
+
+## Plot the ROC curve for the hold-out set
+boost_treeRoc <- roc(response = boost_tree$pred$obs,
+              predictor = boost_tree$pred$death,
+              levels = rev(levels(boost_tree$pred$obs)))
+
+plot(boost_treeRoc, type = "s", col = 'green', 
+     legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$BoostedTree <- c(predict(boost_tree, x_tree_test))
+#testResults$BoostedTree <- as.factor(ifelse(testResults$BoostedTree == 2, "no_death", "death"))
+
+confusionMatrix(testResults$BoostedTree, testResults$obs, positive = "death",
+                mode = "everything")
+```
+
+## KNN Model
+```{r Model 9. KNN}
+set.seed(100)
+knnTune <- train(x = train_withdummies_r, y = y_train,
+                 method = "knn", metric = "ROC",
+                 preProc = c("center", "scale"),  #measuring distances, keep on the same scale and center
+                 tuneGrid = data.frame(k = seq(111, 151, by=2)),   #see which k-value performns the best
+                 trControl = ctrl)      
+knnTune
+plot(knnTune)
+
+## Plot the ROC curve for the hold-out set
+knnRoc <- roc(response = knnTune$pred$obs,
+              predictor = knnTune$pred$death,
+              levels = rev(levels(knnTune$pred$obs)))
+
+plot(knnRoc, type = "s", col = 'green', 
+     legacy.axes = TRUE, print.auc = TRUE, print.auc.y = .6)
+
+testResults$Knn <- predict(knnTune, test_withdummies_r[, names(train_withdummies_r)])
+confusionMatrix(testResults$Knn, testResults$obs, positive = "death",
+                mode = "everything")
+```
+
+## Neural Net Model
+```{r Model 10. Neural Net}
+set.seed(100)
+nnetGrid <- expand.grid(size=1:2, decay=c(0,0.1,1))
+nnetFit <- train(x = train_withdummies_r,
+            	y = y_train,
+            	method = "nnet",
+            	metric = "ROC",
+            	tuneGrid = nnetGrid,
+            	preProc = c("center","scale"),
+            	trControl = ctrl,
+            	maxit = 100,
+            	trace = FALSE)
+
+nnetFit
+
+nnetRoc <- roc(response = nnetFit$pred$obs,
+          	predictor = nnetFit$pred$death,
+          	levels = rev(levels(nnetFit$pred$obs)))
+
+plot(nnetRoc, legacy.axes = TRUE)
+nnetRoc$auc
+
+nnetImp <- varImp(nnetFit, scale = FALSE)
+plot(nnetImp)
+
+testResults$NN <- predict(nnetFit, test_withdummies_r)
+
+confusionMatrix(testResults$NN, testResults$obs, positive = "death")
+```
+
+# Final Model Selection
+```{r}
+par(oma=c(0,0,2,0))
+## Plot ROC Curves ##
+plot(lrRoc, type = "s", col = 'red', legacy.axes = TRUE)
+plot(ldaRoc, type = "s", add = TRUE, col = 'green', legacy.axes = TRUE)
+plot(plsdaRoc, type = "s", add = TRUE, col = "blue", legacy.axes = TRUE)
+plot(mdaRoc, type = "s", add = TRUE, col = 'yellow', legacy.axes = TRUE)
+plot(glmRoc, type = "s", add = TRUE, col = "black",legacy.axes = TRUE)
+plot(dtreeRoc, type = "s", add = TRUE, col = "cyan",legacy.axes = TRUE)
+plot(randforestROC, type = "s", add = TRUE, col = "coral",legacy.axes = TRUE)
+plot(boost_treeRoc, type = "s", add = TRUE, col = "darkred",legacy.axes = TRUE)
+plot(knnRoc, type = "s", add = TRUE, col = "purple",legacy.axes = TRUE)
+plot(nnetRoc, type = "s", add = TRUE, col = "cyan",legacy.axes = TRUE)
+
+legend("bottomright", legend = c("Logistic Regression", "LDA", "PLSDA", "MDA",
+                                 "GLMNET", "Decision Tree", "Random Forest", "Boosted Tree", "KNN",
+                                 "Neural Net"),
+       col = c("red", "green", "blue", "yellow", "black", "cyan", "coral", "darkred", "purple", "cyan"),
+       lwd = 2, cex = 0.5)
+title(main = "ROC Curves By Model", outer = TRUE)
+```
+```{r Metric Table}
+# Performance Metric Table #
+final_metric_table <- data.frame(
+  "Models" = c("Logistic Regression", "Penalized Logistic Regression", "LDA", "PLSDA",
+              "MDA", "Decision Tree", "Random Forest", "Boosted Tree", "KNN", "Neural Net"),
+  "ROC- Train" = c(0.8579, 0.8576, 0.8574, 0.8565, 0.8559, 
+                            0.8167, 0.8634, 0.8746, 0.8401, 0.8571),
+  "Sens. - Train" = c(0.7683, 0.7613, 0.7624, 0.7606, 0.7588, 
+                                    0.7634, 0.7955, 0.7955, 0.5981, 0.7833),
+  "Spec. - Train" = c(0.7830, 0.7835, 0.7848, 0.7843, 0.7836, 
+                                    0.7499, 0.7699, 0.7851, 0.8766, 0.7681),
+  "Sens. - Test" = c(0.7611, 0.7578, 0.7533, 0.7507, 0.7513,
+                                0.7533, 0.7988, 0.7917, 0.6030, 0.7910),
+  "Spec. - Test" = c(0.7972, 0.7982, 0.7991, 0.7985, 0.7989,
+                               0.7547, 0.7777, 0.8000, 0.8795, 0.7710))
+kable(final_metric_table)
+```
+
